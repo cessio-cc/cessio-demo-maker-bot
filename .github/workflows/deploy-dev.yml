@@ -59,7 +59,11 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64
-          tags: ghcr.io/cessio-cc/cessio-maker-bot:dev
+          # Package named after this repo, so it is owned by it and the default
+          # GITHUB_TOKEN may push. Keep it public: the desk's own deploy runs an
+          # unscoped `docker compose pull` on the same host with a token that has
+          # no read access to another repo's private package.
+          tags: ghcr.io/cessio-cc/cessio-demo-maker-bot:dev
           cache-from: type=gha,scope=maker-bot
           cache-to: type=gha,mode=max,scope=maker-bot
 
