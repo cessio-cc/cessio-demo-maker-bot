@@ -85,8 +85,11 @@ jobs:
           envs: GHCR_TOKEN,GHCR_USER
           script: |
             set -e
+            # Log out on every exit path. A job-scoped token left behind by a
+            # failed run dies with the run, and ghcr answers `denied` to the
+            # stale credential instead of serving the public image anonymously.
+            trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
             cd ~/cessio
             docker compose pull maker-bot
             docker compose up -d maker-bot
-            docker logout ghcr.io
