@@ -1,0 +1,29 @@
+{
+  "name": "cessio-demo-maker-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Demo maker bot for the Cessio RFQ desk: registers itself via the public Maker API and quotes every incoming RFQ around the reference price.",
+  "homepage": "https://docs.devnet.cessio.cc/guides/building-a-bot",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cessio-cc/cessio-demo-maker-bot.git"
+  },
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "dev": "node --watch src/index.ts",
+    "start": "node src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "ws": "^8.21.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  }
+}

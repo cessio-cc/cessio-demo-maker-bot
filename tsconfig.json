@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "types": ["node"],
+    // The bot runs directly on Node 24's native type stripping (no tsx, no
+    // build), which requires relative imports to carry the real `.ts` extension.
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src", "test"]
+}

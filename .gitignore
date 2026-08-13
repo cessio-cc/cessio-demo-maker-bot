@@ -1,0 +1,4 @@
+node_modules/
+# Persisted identity: party key + API key. Never commit.
+state/
+.env
