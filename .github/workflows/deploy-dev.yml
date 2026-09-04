@@ -92,4 +92,8 @@ jobs:
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
             cd ~/cessio
             docker compose pull maker-bot
-            docker compose up -d maker-bot
+            # --no-deps: the bot depends_on the api, and a plain `up` would
+            # recreate the api too — from the host .env's IMAGE_TAG, which this
+            # token cannot pull (private package) and which is not this
+            # workflow's business anyway.
+            docker compose up -d --no-deps maker-bot
