@@ -30,46 +30,33 @@ async function main(): Promise<void> {
   const api = makeApi(cfg.apiUrl, () => identity?.apiKey ?? "");
 
   if (identity !== undefined && identity.apiKey === "") {
-    // Half-finished registration: the key survived, the complete answer didn't.
-    log("identity has no API key (lost register/complete answer) — recovering via challenge + rotate");
+    log("identity has no API key — recovering via challenge + rotate");
     identity = await recoverApiKey(api, cfg.stateFile);
   }
-  let initialActions: SignActionDto[] = [];
   if (identity === undefined) {
     log(`no identity at ${cfg.stateFile} — registering "${cfg.displayName}" at ${cfg.apiUrl}`);
-    ({ identity, actions: initialActions } = await register(api, cfg.displayName, cfg.stateFile));
+    identity = await register(api, cfg.displayName, cfg.stateFile);
     log(`registered as ${identity.hint} (${identity.partyId})`);
   }
   const id = identity;
   log(`maker ${id.hint} — desk ${cfg.apiUrl}, spread ${cfg.spreadBps} bps`);
 
-  /** RFQs quoted this run, keyed by rfqId: keeps stream-reconnect snapshots
-   * from churning the on-ledger proposal pair, and remembers the RFQ so an
-   * expired quote can be re-quoted while the RFQ is still open. A restart
-   * re-quotes once — replace is documented. */
+  /** RFQs quoted this run, so a stream snapshot does not re-quote and an expired quote can be renewed. */
   const live = new Map<string, RfqDto>();
-  /** Action ids already handled, so housekeeping doesn't re-sign what an
-   * inline response signed a moment ago. Ids are REMOVED again on transport
-   * failure and on retryable per-action errors — an entry here must never
-   * outlive a retriable action (it would expire unsigned and fail the trade).
-   * Expiry is 10 min, so capping the set is enough. */
+  /** Action ids already signed; an id is released again on transport failure or a retryable error. */
   const signed = new Set<string>();
 
   async function signAndExecute(actions: SignActionDto[]): Promise<void> {
     if (signed.size > 5000) signed.clear();
-    // The bot never withdraws: a transfer-out here is something the desk made
-    // up, and signing it would move funds out. Refuse once, loudly.
     for (const a of actions) {
       if (a.purpose === "transfer-out" && !signed.has(a.id)) {
-        log(`REFUSING unexpected transfer-out: ${a.description}`);
+        log(`REFUSING unexpected transfer-out: ${a.description}`); // the bot never withdraws
         signed.add(a.id);
       }
     }
     const fresh = actions.filter((a) => !signed.has(a.id));
-    // Chunked: the server caps a batch at 50, and a smaller chunk keeps the
-    // call's sequential ledger work inside its request timeout.
     for (let i = 0; i < fresh.length; i += 10) {
-      const chunk = fresh.slice(i, i + 10);
+      const chunk = fresh.slice(i, i + 10); // the desk caps a batch at 50
       for (const a of chunk) {
         signed.add(a.id);
         log(`signing: ${a.description}`);
@@ -81,21 +68,18 @@ async function main(): Promise<void> {
           60_000,
         );
         for (const r of res.results) {
-          if (r.status !== "error") continue; // in-flight: already running elsewhere
+          if (r.status !== "error") continue;
           log(`action ${r.actionId} failed (retryable=${r.retryable ?? false}): ${r.error}`);
-          if (r.retryable === true) signed.delete(r.actionId); // next housekeeping re-signs
+          if (r.retryable === true) signed.delete(r.actionId);
         }
       } catch (e) {
-        // Transport failure — nothing certain happened; let housekeeping retry.
         for (const a of chunk) signed.delete(a.id);
         throw e;
       }
     }
   }
 
-  /** The demo policy: quote EVERY RFQ at mid ± spread, mid being the desk's
-   * reference price with BOT_STATIC_PRICES as the fallback. No mid at all
-   * means no quote — the bot has no other opinion of fair value. */
+  /** Quote every RFQ at mid ± spread; no mid means no quote. */
   async function quote(rfq: RfqDto, requote = false): Promise<void> {
     if (!requote && live.has(rfq.rfqId)) return;
     live.set(rfq.rfqId, rfq);
@@ -105,42 +89,32 @@ async function main(): Promise<void> {
       );
       const mid = ref.price ?? cfg.staticPrices[`${rfq.base}/${rfq.quote}`];
       if (mid === undefined) {
-        log(`no price for ${rfq.base}/${rfq.quote} (no reference, no static) — skipping ${rfq.rfqId}`);
-        live.delete(rfq.rfqId); // a snapshot replay retries once the oracle is back
+        log(`no price for ${rfq.base}/${rfq.quote} — skipping ${rfq.rfqId}`);
+        live.delete(rfq.rfqId);
         return;
       }
       const price = quotePrice(mid, rfq.direction, cfg.spreadBps, cfg.priceDivisor);
-      // Never promise what settlement cannot take: an accepted-then-failed
-      // trade is the worst demo outcome, and one whale RFQ must not commit
-      // more than maxSpendShare of any holding.
+      // Never quote what settlement cannot take: a failed trade is worse than no quote.
       const spend = makerSpend(rfq.direction, rfq.qty, price, rfq.feeBps);
       const balances = await api.get<BalancesDto>("/wallet/holdings");
       if (
         spend.base > cfg.maxSpendShare * heldOf(balances, rfq.base) ||
         spend.quote > cfg.maxSpendShare * heldOf(balances, rfq.quote)
       ) {
-        log(
-          `skipping ${rfq.rfqId}: settling would take ${spend.base} ${rfq.base} + ${spend.quote} ${rfq.quote}, ` +
-            `over ${cfg.maxSpendShare * 100}% of holdings`,
-        );
-        live.delete(rfq.rfqId); // a snapshot replay retries once funds arrive
+        log(`skipping ${rfq.rfqId}: ${spend.base} ${rfq.base} + ${spend.quote} ${rfq.quote} exceeds ${cfg.maxSpendShare * 100}% of holdings`);
+        live.delete(rfq.rfqId);
         return;
       }
-      // Explicit validity window, capped by the RFQ deadline (an explicit
-      // validUntil past the deadline is a 409 by design).
-      const validUntil = new Date(
-        Math.min(Date.now() + cfg.quoteTtlSeconds * 1_000, Date.parse(rfq.deadline)),
-      ).toISOString();
+      // A validUntil past the RFQ deadline is a 409.
+      const validUntil = new Date(Math.min(Date.now() + cfg.quoteTtlSeconds * 1_000, Date.parse(rfq.deadline))).toISOString();
       const q = await api.post<MakerQuoteResponse>("/maker/quotes", { rfqId: rfq.rfqId, price, validUntil });
       const verb = rfq.direction === "SELL" ? "sells" : "buys";
       const midSource = ref.price === null ? "static" : "reference";
       const scale = cfg.priceDivisor === 1 ? "" : ` /${cfg.priceDivisor}`;
       log(`quoted ${rfq.rfqId}: taker ${verb} ${rfq.qty} ${rfq.base} @ ${price} ${rfq.quote} (${midSource} mid ${mid}${scale})`);
-      await signAndExecute(q.actions);
+      await signAndExecute(q.actions); // the allocations ARE the quote; the taker sees it once they land
     } catch (e) {
-      // Any failure un-books the RFQ so a snapshot replay can retry; if it was
-      // 404/409 (closed or deadline passed) no replay will come — no harm.
-      live.delete(rfq.rfqId);
+      live.delete(rfq.rfqId); // a snapshot replay retries
       if (e instanceof HttpError && (e.status === 404 || e.status === 409)) log(`quote ${rfq.rfqId} skipped: ${e.body}`);
       else log(`quote ${rfq.rfqId} error: ${String(e)}`);
     }
@@ -151,20 +125,15 @@ async function main(): Promise<void> {
       case "rfq.created":
         return quote(ev.payload as RfqDto);
       case "rfq.closed":
-      case "rfq.expired": {
+      case "rfq.expired":
         live.delete((ev.payload as { rfqId: string }).rfqId);
         return;
-      }
       case "quote.status": {
         const p = ev.payload as { quoteId: string; rfqId: string; status: QuoteDto["status"] };
         if (p.status === "pending") return;
         log(`quote ${p.quoteId} on ${p.rfqId}: ${p.status}`);
-        // The quote timed out but the RFQ is still open (its close arrives as a
-        // separate event): put a fresh one up — this bot always has a price.
-        if (p.status === "expired") {
-          const rfq = live.get(p.rfqId);
-          if (rfq !== undefined) return quote(rfq, true);
-        }
+        const rfq = live.get(p.rfqId);
+        if (p.status === "expired" && rfq !== undefined) return quote(rfq, true); // the RFQ itself is still open
         return;
       }
       case "trade.settled": {
@@ -178,17 +147,14 @@ async function main(): Promise<void> {
         return;
       }
       case "resync":
-        // Server state reset: our quote bookkeeping is stale; the snapshot
-        // replays rfq.created for whatever is still live, so requote it all.
-        live.clear();
+        live.clear(); // the snapshot replays whatever is still open
         return;
       default:
-        return; // quote.created, trade.step, balances.updated, ... — informational
+        return;
     }
   }
 
-  /** One socket, reconnected forever with a flat 5s backoff. The connect-time
-   * snapshot replays open RFQs and doubles as the resync. */
+  /** One socket, reconnected forever; the connect-time snapshot is the resync. */
   let stream: WebSocket | undefined;
   function connectStream(): void {
     const options = api.streamOptions();
@@ -196,11 +162,7 @@ async function main(): Promise<void> {
     stream = ws;
     ws.on("open", () => {
       log("stream connected");
-      // Start from the snapshot's truth: a quote that expired while we were
-      // offline arrives with myQuote=null and must be re-quoted, and entries
-      // for RFQs that closed offline would otherwise linger forever. Costs one
-      // quote replace per open RFQ per reconnect — reconnects are rare.
-      live.clear();
+      live.clear(); // start from the snapshot's truth: quotes expired and RFQs closed while offline
     });
     ws.on("message", (data) => {
       let parsed: WsEvent;
@@ -215,11 +177,10 @@ async function main(): Promise<void> {
       log("stream closed — reconnecting in 5s");
       setTimeout(connectStream, 5_000);
     });
-    ws.on("error", () => {}); // close always follows; the retry lives there
+    ws.on("error", () => {}); // close follows
   }
 
-  /** Everything that is polling by nature: actions the desk enqueued without
-   * asking us (allocations after an accept), the deposit inbox, the faucet. */
+  /** Periodic chores: retry unsigned actions, accept deposits, top up from the DevNet faucet. */
   async function housekeeping(): Promise<void> {
     const pending = await api.get<{ actions: SignActionDto[] }>("/tx/pending");
     await signAndExecute(pending.actions);
@@ -231,30 +192,24 @@ async function main(): Promise<void> {
         const r = await api.post<{ actions: SignActionDto[] }>(`/wallet/incoming/${encodeURIComponent(t.cid)}/accept`);
         await signAndExecute(r.actions);
       } catch (e) {
-        // One rotten transfer must not block the rest of the inbox or the faucet.
         log(`deposit ${t.cid} accept failed: ${String(e)}`);
       }
     }
 
-    // Self-funding on DevNet (`enabled` is false everywhere else) — politely:
-    // the reservoir is shared with human demo users, so draw only when some
-    // offered token is genuinely low (under ~10 drips of it), not every cooldown.
+    // The faucet is shared with human demo users: draw only when a token runs low.
     const faucet = await api.get<FaucetInfo>("/faucet");
     if (faucet.enabled && faucet.retryAfterSeconds === 0) {
       const balances = await api.get<BalancesDto>("/wallet/holdings");
       if (faucet.drip.some((d) => heldOf(balances, d.symbol) < 10 * Number(d.amount))) {
-        const drip = await api.post<FaucetDripResult>("/faucet", undefined, 60_000); // one transfer per token
+        const drip = await api.post<FaucetDripResult>("/faucet", undefined, 60_000);
         if (drip.sent.length > 0) log(`faucet drip: ${drip.sent.map((d) => `${d.amount} ${d.symbol}`).join(", ")}`);
       }
     }
   }
 
-  // Startup order: sign what registration handed us (a failure is retried via
-  // /tx/pending), drain anything parked while we were down, then go live.
-  await signAndExecute(initialActions).catch((e) => log(`initial sign failed (will retry): ${String(e)}`));
   await housekeeping().catch((e) => log(`housekeeping error: ${String(e)}`));
   const status = await api.get<MakerStatusResponse>("/maker/status");
-  log(`status: serviceActivated=${status.serviceActivated} pendingActions=${status.pendingActions}`);
+  log(`status: party ${status.hint}, pendingActions=${status.pendingActions}`);
   connectStream();
 
   let busy = false;
@@ -268,11 +223,7 @@ async function main(): Promise<void> {
       });
   }, cfg.pollSeconds * 1_000);
 
-  // Dead-socket watchdog: the desk only advertises makers with a live stream,
-  // and a silently-dropped TCP link can look open here for many minutes. If
-  // the desk says we are not invitable while we think we are connected, the
-  // socket is a zombie — recycle it. Once a minute: /maker/status reads the
-  // ledger, the spec asks for a human cadence.
+  // The desk advertises only makers with a live stream; a zombie socket still looks open here. Recycle it.
   setInterval(() => {
     void api
       .get<MakerStatusResponse>("/maker/status")
@@ -282,7 +233,7 @@ async function main(): Promise<void> {
           stream.close();
         }
       })
-      .catch(() => {}); // transient; the next probe will tell
+      .catch(() => {});
   }, 60_000);
 }
 

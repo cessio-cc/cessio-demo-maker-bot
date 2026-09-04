@@ -1,18 +1,9 @@
 import { createPrivateKey, generateKeyPairSync, sign as edSign, type KeyObject } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import {
-  HttpError,
-  type Api,
-  type MakerRegisterCompleteResponse,
-  type MakerRegisterStartResponse,
-  type SignActionDto,
-} from "./api.ts";
+import { HttpError, type Api, type MakerRegisterCompleteResponse, type MakerRegisterStartResponse } from "./api.ts";
 
-/** What survives restarts. The party key never leaves this file. `apiKey` (and
- * `hint`) are "" while a registration is in flight — the key is persisted
- * BEFORE register/complete, so a lost complete answer costs nothing the
- * challenge + rotate recovery cannot get back. */
+/** The state file. The party key never leaves it; `apiKey` is "" while a registration is in flight. */
 interface StoredIdentity {
   partyId: string;
   hint: string;
@@ -24,10 +15,9 @@ export interface Identity {
   partyId: string;
   hint: string;
   apiKey: string;
-  /** base64 Ed25519 signature over the RAW bytes of a base64 hash (openapi:
-   * sign the bytes, never the base64 text). */
+  /** Ed25519 over the RAW bytes of a base64 hash (sign actions). */
   signHash(hashB64: string): string;
-  /** base64 Ed25519 signature over a challenge as UTF-8 text (rotate path). */
+  /** Ed25519 over UTF-8 text (the key-rotation challenge). */
   signText(text: string): string;
 }
 
@@ -51,18 +41,13 @@ function load(stateFile: string): StoredIdentity {
   return JSON.parse(readFileSync(stateFile, "utf8")) as StoredIdentity;
 }
 
-/** A corrupt state file throws instead of silently re-registering: a fresh
- * registration would orphan the previous party together with its funds. */
+/** A corrupt file throws rather than re-registering: a new party would orphan the old one's funds. */
 export function loadIdentity(stateFile: string): Identity | undefined {
   if (!existsSync(stateFile)) return undefined;
   return toIdentity(load(stateFile));
 }
 
-/** Recovery for a half-finished registration (key on disk, apiKey "") — the
- * register/complete answer was lost after the desk may have committed it.
- * Proves key ownership via challenge + rotate and gets a fresh key. Returns
- * undefined when the desk never knew the party (complete never landed): the
- * caller registers afresh, orphaning only an unfinished party id. */
+/** A fresh API key for a party whose key we hold (challenge + rotate); undefined = the desk never knew it. */
 export async function recoverApiKey(api: Api, stateFile: string): Promise<Identity | undefined> {
   const stored = load(stateFile);
   const idn = toIdentity(stored);
@@ -81,24 +66,15 @@ export async function recoverApiKey(api: Api, stateFile: string): Promise<Identi
   }
 }
 
-/** Self-serve registration (openapi /maker/register/*): generate the party
- * key, sign the topology hashes, persist the identity, and hand back the
- * settlement-service activation actions for the caller to sign. */
-export async function register(
-  api: Api,
-  displayName: string,
-  stateFile: string,
-): Promise<{ identity: Identity; actions: SignActionDto[] }> {
+/** Self-serve registration: generate the party key, sign the topology, persist the identity. */
+export async function register(api: Api, displayName: string, stateFile: string): Promise<Identity> {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   const spki = publicKey.export({ type: "spki", format: "der" });
   const publicKeyB64 = Buffer.from(spki.subarray(spki.length - 32)).toString("base64");
   const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
 
-  const start = await api.post<MakerRegisterStartResponse>("/maker/register/start", {
-    displayName,
-    publicKey: publicKeyB64,
-  });
-  // Key hits the disk before complete — see StoredIdentity.
+  const start = await api.post<MakerRegisterStartResponse>("/maker/register/start", { displayName, publicKey: publicKeyB64 });
+  // The key hits the disk before complete: a lost answer is recovered by recoverApiKey.
   save(stateFile, { partyId: start.partyId, hint: "", apiKey: "", privateKeyPem });
   const complete = await api.post<MakerRegisterCompleteResponse>(
     "/maker/register/complete",
@@ -106,10 +82,9 @@ export async function register(
       registrationId: start.registrationId,
       signatures: start.topology.map((t) => edSign(null, Buffer.from(t.hash, "base64"), privateKey).toString("base64")),
     },
-    60_000, // party allocation + topology on a live network is slow
+    60_000,
   );
-
-  const stored: StoredIdentity = { partyId: complete.partyId, hint: complete.hint, apiKey: complete.apiKey, privateKeyPem };
+  const stored = { partyId: complete.partyId, hint: complete.hint, apiKey: complete.apiKey, privateKeyPem };
   save(stateFile, stored);
-  return { identity: toIdentity(stored), actions: complete.actions };
+  return toIdentity(stored);
 }

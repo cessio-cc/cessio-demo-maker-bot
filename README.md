@@ -6,7 +6,7 @@ confidential request-for-quote desk for large swaps on Canton Network.
 It plays a third-party integrator: **everything it does goes through the public
 Maker API**. No internal packages, one runtime dependency (`ws`, for
 authenticated upgrade headers), Node 24 native TypeScript, global `fetch`.
-Under 900 lines including tests.
+Under 750 lines including tests.
 
 Fork it, change the pricing, run your own maker.
 
@@ -18,16 +18,22 @@ Fork it, change the pricing, run your own maker.
 1. **Registers itself** on first run (`/maker/register/start` + `/complete`):
    generates an Ed25519 party key, signs the topology, stores the identity
    (party key + API key) in `state/identity.json` (mode 0600, gitignored).
-2. **Signs everything** it is handed — activation, quote proposal pairs,
-   allocations after a taker accepts, deposit accepts — via `GET /tx/pending` +
-   batch `POST /tx/execute`. The one exception: it refuses `transfer-out`
-   actions, because it never initiates a withdrawal.
+2. **Signs everything** it is handed — the token-standard v2 allocations that
+   _are_ its quote (one per instrument the quote touches; the taker cannot see
+   the quote until they land) and deposit accepts — inline from the call that
+   produced them, with `GET /tx/pending` + batch `POST /tx/execute` as the
+   retry path. The one exception: it refuses `transfer-out` actions, because
+   it never initiates a withdrawal. Settlement asks nothing more of the maker:
+   the accept adds the taker's allocations and the desk settles both legs plus
+   its fee in one atomic transaction.
 3. **Quotes every incoming RFQ it can settle** from `/maker/stream` at the
    desk's reference price (`/maker/reference-price`) ± `BOT_SPREAD_BPS` in its
    favor, falling back to `BOT_STATIC_PRICES` when the oracle has none. No
    mid → no quote; and an RFQ whose settlement would take more than
    `BOT_MAX_SPEND_SHARE` of a holding is skipped — a quote that fails at
-   settlement is worse for the taker than no quote.
+   settlement is worse for the taker than no quote. A standing quote locks the
+   funds it commits until it settles, expires or is replaced; `/wallet/holdings`
+   reports the free balance, so the gate already accounts for quotes out.
 4. **Keeps itself funded** on DevNet: accepts every pending deposit, and draws
    from the desk faucet only when a holding runs low (the reservoir is shared
    with human demo users).
@@ -66,8 +72,7 @@ docker run -d --name my-maker-bot \
 ```
 
 First run registers a fresh maker party and prints its party hint. Give it a
-minute: registration, activation, and the first faucet draw all settle
-on-ledger.
+minute: registration and the first faucet draw both settle on-ledger.
 
 ## Config (env)
 

@@ -1,19 +1,17 @@
-/** The subset of docs/openapi.yaml the bot touches. Deliberately local types:
- * the bot plays a third-party integrator coded against the public spec, not
- * against the desk's internal @rfq/shared schemas. */
+/** The slice of the public Maker API (docs/openapi.yaml) the bot uses. */
 
 export interface SignActionDto {
   id: string;
-  purpose: string;
+  purpose: "allocate" | "transfer-accept" | "transfer-out";
   description: string;
-  /** base64 bytes of a Canton prepared-transaction hash — sign the RAW bytes. */
+  /** base64 hash of a prepared transaction — sign the RAW bytes. */
   hash: string;
 }
 
 export interface RfqDto {
   rfqId: string;
   taker: string;
-  /** From the taker's side: SELL = the taker sells the base asset to us. */
+  /** The taker's side: SELL = the taker sells the base asset to us. */
   direction: "SELL" | "BUY";
   qty: string;
   base: string;
@@ -32,11 +30,11 @@ export interface QuoteDto {
   quoteId: string;
   rfqId: string;
   price: string;
-  status: "pending" | "won" | "lost" | "expired" | "revoked";
+  status: "pending" | "won" | "lost" | "expired" | "revoked" | "cancelled";
 }
 
+/** The quote plus its allocations to sign; the taker sees nothing until they land. */
 export interface MakerQuoteResponse extends QuoteDto {
-  /** The DvpProposal pair (fee + swap) to sign; the quote is invisible to the taker until both are. */
   actions: SignActionDto[];
 }
 
@@ -76,7 +74,6 @@ export interface MakerStatusResponse {
   partyId: string;
   hint: string;
   invitable: boolean;
-  serviceActivated: boolean;
   pendingActions: number;
 }
 
@@ -90,10 +87,9 @@ export interface MakerRegisterCompleteResponse {
   partyId: string;
   hint: string;
   apiKey: string;
-  actions: SignActionDto[];
 }
 
-/** One /maker/stream message; payload shape depends on `type` (see openapi). */
+/** One /maker/stream message; the payload shape depends on `type`. */
 export interface WsEvent {
   type: string;
   payload: unknown;
@@ -113,24 +109,18 @@ export class HttpError extends Error {
 
 export interface Api {
   get<T>(path: string): Promise<T>;
-  /** Raise `timeoutMs` only for calls that do many ledger round-trips. */
   post<T>(path: string, body?: unknown, timeoutMs?: number): Promise<T>;
-  /** Node WebSocket upgrade options for the authenticated maker stream. */
   streamOptions(): { url: string; headers: Record<string, string> };
 }
 
-/** Thin fetch client. `apiKey` is read per call so the client can be created
- * before registration has produced a key. Non-2xx throws HttpError. Every call
- * is time-bounded: one hung keep-alive socket must not stall the sign loop for
- * the minutes undici's defaults would allow. */
+/** fetch with X-API-Key, JSON bodies and a timeout on every call. Non-2xx throws HttpError. */
 export function makeApi(baseUrl: string, apiKey: () => string): Api {
   async function call<T>(method: string, path: string, body?: unknown, timeoutMs = 15_000): Promise<T> {
     const key = apiKey();
     const res = await fetch(baseUrl + path, {
       method,
       headers: {
-        // content-type only WITH a body: fastify 400s an empty json-typed body.
-        ...(body === undefined ? {} : { "content-type": "application/json" }),
+        ...(body === undefined ? {} : { "content-type": "application/json" }), // fastify 400s a typed empty body
         ...(key === "" ? {} : { "x-api-key": key }),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
