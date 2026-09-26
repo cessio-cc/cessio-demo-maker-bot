@@ -33,7 +33,9 @@ Fork it, change the pricing, run your own maker.
    `BOT_MAX_SPEND_SHARE` of a holding is skipped — a quote that fails at
    settlement is worse for the taker than no quote. A standing quote locks the
    funds it commits until it settles, expires or is replaced; `/wallet/holdings`
-   reports the free balance, so the gate already accounts for quotes out.
+   reports the free balance, so the gate already accounts for quotes out. An
+   expired quote is renewed while its RFQ is open, and so is one revoked by a
+   failed trade — nothing moved, and the taker may accept again.
 4. **Keeps itself funded** on DevNet: accepts every pending deposit, and draws
    from the desk faucet only when a holding runs low (the reservoir is shared
    with human demo users).

@@ -142,8 +142,12 @@ async function main(): Promise<void> {
         return;
       }
       case "trade.failed": {
-        const p = ev.payload as { tradeId: string; reason: string };
+        const p = ev.payload as { tradeId: string; rfqId: string; reason: string };
         log(`trade ${p.tradeId} FAILED: ${p.reason}`);
+        // Nothing moved and the RFQ stays open for another accept — but our quote
+        // was revoked with the trade, so quote the RFQ afresh.
+        const rfq = live.get(p.rfqId);
+        if (rfq !== undefined) return quote(rfq, true);
         return;
       }
       case "resync":
