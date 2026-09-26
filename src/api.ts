@@ -21,6 +21,12 @@ export interface RfqDto {
   feeBps: number;
 }
 
+/** GET /rfq/incoming: an RFQ we are invited to, with our latest quote on it. */
+export interface IncomingRfqDto extends RfqDto {
+  open: boolean;
+  myQuote: QuoteDto | null;
+}
+
 export interface BalancesDto {
   party: string;
   holdings: { symbol: string; displaySymbol: string; amount: string }[];
@@ -55,6 +61,8 @@ export interface TxExecuteBatchResponse {
 export interface IncomingTransferDto {
   cid: string;
   symbol: string;
+  /** Absent from desks before the 0.7 API. */
+  displaySymbol?: string;
   amount: string;
   sender: string;
 }

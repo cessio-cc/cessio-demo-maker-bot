@@ -5,6 +5,7 @@ import {
   type BalancesDto,
   type FaucetDripResult,
   type FaucetInfo,
+  type IncomingRfqDto,
   type IncomingTransferDto,
   type MakerQuoteResponse,
   type MakerStatusResponse,
@@ -144,30 +145,42 @@ async function main(): Promise<void> {
       case "trade.failed": {
         const p = ev.payload as { tradeId: string; rfqId: string; reason: string };
         log(`trade ${p.tradeId} FAILED: ${p.reason}`);
-        // Nothing moved and the RFQ stays open for another accept — but our quote
-        // was revoked with the trade, so quote the RFQ afresh.
+        // Nothing moved and the RFQ stays open for another accept until its
+        // deadline — but our quote was revoked with the trade, so quote it afresh.
         const rfq = live.get(p.rfqId);
         if (rfq !== undefined) return quote(rfq, true);
         return;
       }
       case "resync":
-        live.clear(); // the snapshot replays whatever is still open
+        stream?.close(); // server state was reset: reconnect for a fresh snapshot
         return;
       default:
         return;
     }
   }
 
+  /** What we already quote, read BEFORE the snapshot replays rfq.created: quoting
+   * a live quote again would replace it for nothing. Unreadable -> start empty
+   * and let the snapshot re-quote. */
+  async function seedLive(): Promise<void> {
+    live.clear(); // quotes expired and RFQs closed while we were offline
+    try {
+      for (const r of await api.get<IncomingRfqDto[]>("/rfq/incoming")) {
+        if (r.open && r.myQuote?.status === "pending") live.set(r.rfqId, r);
+      }
+    } catch (e) {
+      log(`rfq/incoming unreadable — the snapshot re-quotes: ${String(e)}`);
+    }
+  }
+
   /** One socket, reconnected forever; the connect-time snapshot is the resync. */
   let stream: WebSocket | undefined;
-  function connectStream(): void {
+  async function connectStream(): Promise<void> {
+    await seedLive();
     const options = api.streamOptions();
     const ws = new WebSocket(options.url, { headers: options.headers });
     stream = ws;
-    ws.on("open", () => {
-      log("stream connected");
-      live.clear(); // start from the snapshot's truth: quotes expired and RFQs closed while offline
-    });
+    ws.on("open", () => log("stream connected"));
     ws.on("message", (data) => {
       let parsed: WsEvent;
       try {
@@ -179,7 +192,7 @@ async function main(): Promise<void> {
     });
     ws.on("close", () => {
       log("stream closed — reconnecting in 5s");
-      setTimeout(connectStream, 5_000);
+      setTimeout(() => void connectStream(), 5_000);
     });
     ws.on("error", () => {}); // close follows
   }
@@ -192,7 +205,7 @@ async function main(): Promise<void> {
     const inbox = await api.get<{ transfers: IncomingTransferDto[] }>("/wallet/incoming");
     for (const t of inbox.transfers) {
       try {
-        log(`accepting deposit: ${t.amount} ${t.symbol} from ${t.sender}`);
+        log(`accepting deposit: ${t.amount} ${t.displaySymbol ?? t.symbol} from ${t.sender}`);
         const r = await api.post<{ actions: SignActionDto[] }>(`/wallet/incoming/${encodeURIComponent(t.cid)}/accept`);
         await signAndExecute(r.actions);
       } catch (e) {
@@ -214,7 +227,7 @@ async function main(): Promise<void> {
   await housekeeping().catch((e) => log(`housekeeping error: ${String(e)}`));
   const status = await api.get<MakerStatusResponse>("/maker/status");
   log(`status: party ${status.hint}, pendingActions=${status.pendingActions}`);
-  connectStream();
+  await connectStream();
 
   let busy = false;
   setInterval(() => {

@@ -40,8 +40,10 @@ Fork it, change the pricing, run your own maker.
    from the desk faucet only when a holding runs low (the reservoir is shared
    with human demo users).
 
-The stream reconnects with a flat 5s backoff; the connect-time snapshot replays
-open RFQs, so a reconnect is a resync.
+The stream reconnects with a flat 5s backoff (and on a `resync` frame); the
+connect-time snapshot replays open RFQs, so a reconnect is a resync. RFQs that
+already hold a live quote of ours (read from `GET /rfq/incoming` just before
+connecting) are not quoted again.
 
 ## Run
 
