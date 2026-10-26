@@ -10,7 +10,7 @@
     "type": "git",
     "url": "git+https://github.com/cessio-cc/cessio-demo-maker-bot.git"
   },
-  "engines": { "node": ">=24" },
+  "engines": { "node": ">=24.22.1" },
   "scripts": {
     "dev": "node --watch src/index.ts",
     "start": "node src/index.ts",
@@ -18,12 +18,12 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "ws": "^8.21.2"
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@types/node": "^24",
     "@types/ws": "^8.18.1",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.12"
   }
 }
